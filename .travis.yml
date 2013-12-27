@@ -1,0 +1,31 @@
+language: ruby
+before_install:
+  - export ANDROID_OS=$ANDROID_TARGET
+  - sudo apt-get update -qq
+  - if [ `uname -m` = x86_64 ]; then sudo apt-get install -qq --force-yes libgd2-xpm ia32-libs ia32-libs-multiarch; fi
+
+rvm:
+  - "2.1.0"
+
+jdk:
+  - oraclejdk7
+
+env:
+  matrix:
+    - ANDROID_TARGET=16 JRUBY_JARS_VERSION=1.7.9
+    - ANDROID_TARGET=16 JRUBY_JARS_VERSION=1.7.4
+    - ANDROID_TARGET=10 JRUBY_JARS_VERSION=1.7.9
+    - ANDROID_TARGET=10 JRUBY_JARS_VERSION=1.7.4
+    - ANDROID_TARGET=15 JRUBY_JARS_VERSION=1.7.9
+    - ANDROID_TARGET=15 JRUBY_JARS_VERSION=1.7.4
+    - ANDROID_TARGET=17 JRUBY_JARS_VERSION=1.7.9
+    - ANDROID_TARGET=17 JRUBY_JARS_VERSION=1.7.4
+
+script:
+    - ruboto setup -y -t $ANDROID_TARGET
+    - source ~/.rubotorc
+    - ruboto emulator -t $ANDROID_TARGET
+    - rake test
+
+notifications:
+  irc: "irc.freenode.org#ruboto"
