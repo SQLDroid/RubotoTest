@@ -1,7 +1,10 @@
-.bundle
 .DS_Store
-.idea
-bin
-gen
-tmp
-local.properties
+/.idea
+/bin
+/gen
+/libs
+/test/bin
+/test/gen
+/test/local.properties
+/tmp
+/local.properties
