@@ -4,15 +4,22 @@ require 'time'
 require 'rake/clean'
 require 'rexml/document'
 require 'timeout'
+require_relative 'ruboto.device'
 
 ON_WINDOWS = (RbConfig::CONFIG['host_os'] =~ /mswin|mingw/i)
 
-ANT_CMD = ON_WINDOWS ? 'ant.bat' : 'ant'
+ANT_BINARY = ON_WINDOWS ? 'ant.bat' : 'ant'
+ANT_VERSION_CMD = "#{ANT_BINARY} -version"
 
-if `#{ANT_CMD} -version` !~ /version (\d+)\.(\d+)\.(\d+)/ || $1.to_i < 1 || ($1.to_i == 1 && $2.to_i < 8)
+if (ant_version_output = `#{ANT_VERSION_CMD}`) !~ /version (\d+)\.(\d+)\.(\d+)/ || $1.to_i < 1 || ($1.to_i == 1 && $2.to_i < 8)
+  puts ANT_VERSION_CMD
+  puts ant_version_output
   puts "ANT version 1.8.0 or later required.  Version found: #{$1}.#{$2}.#{$3}"
   exit 1
 end
+
+ANT_CMD = ANT_BINARY.dup
+ANT_CMD << ' -v' if Rake.application.options.trace == true
 
 #
 # OS independent "which"
@@ -31,8 +38,8 @@ end
 
 adb_version_str = `adb version`
 (puts 'Android SDK platform tools not in PATH (adb command not found).'; exit 1) unless $? == 0
-(puts "Unrecognized adb version: #$1"; exit 1) unless adb_version_str =~ /Android Debug Bridge version (\d+\.\d+\.\d+)/
-(puts "adb version 1.0.31 or later required.  Version found: #$1"; exit 1) unless Gem::Version.new($1) >= Gem::Version.new('1.0.31')
+(puts "Unrecognized adb version: #{$1}"; exit 1) unless adb_version_str =~ /Android Debug Bridge version (\d+\.\d+\.\d+)/
+(puts "adb version 1.0.31 or later required.  Version found: #{$1}"; exit 1) unless Gem::Version.new($1) >= Gem::Version.new('1.0.31')
 android_home = ENV['ANDROID_HOME']
 if android_home.nil?
   if (adb_path = which('adb'))
@@ -46,38 +53,32 @@ else
 end
 
 # FIXME(uwe): Simplify when we stop supporting Android SDK < 22: Don't look in platform-tools for dx
-DX_FILENAME = Dir[File.join(android_home, '{build-tools/*,platform-tools}', ON_WINDOWS ? 'dx.bat' : 'dx')][-1]
+DX_FILENAMES = Dir[File.join(android_home, '{build-tools/*,platform-tools}', ON_WINDOWS ? 'dx.bat' : 'dx')]
 # EMXIF
 
-unless DX_FILENAME
+unless DX_FILENAMES.any?
   puts 'You need to install the Android SDK Build-tools!'
   exit 1
 end
 
-def manifest;
+def manifest
   @manifest ||= REXML::Document.new(File.read(MANIFEST_FILE))
 end
 
-def package;
+def package
   manifest.root.attribute('package')
 end
 
-def build_project_name;
+def build_project_name
   @build_project_name ||= REXML::Document.new(File.read('build.xml')).elements['project'].attribute(:name).value
 end
 
-def scripts_path;
-  @sdcard_path ||= "/mnt/sdcard/Android/data/#{package}/files/scripts"
-end
-
-def app_files_path;
+def app_files_path
   @app_files_path ||= "/data/data/#{package}/files"
 end
 
-PROJECT_DIR = File.expand_path('..', File.dirname(__FILE__))
-UPDATE_MARKER_FILE = File.join(PROJECT_DIR, 'bin', 'LAST_UPDATE')
 BUNDLE_JAR = File.expand_path 'libs/bundle.jar'
-BUNDLE_PATH = File.expand_path 'bin/bundle'
+BUNDLE_PATH = File.join(PROJECT_DIR, 'bin', 'bundle')
 MANIFEST_FILE = File.expand_path 'AndroidManifest.xml'
 PROJECT_PROPS_FILE = File.expand_path 'project.properties'
 RUBOTO_CONFIG_FILE = File.expand_path 'ruboto.yml'
@@ -91,16 +92,20 @@ JARS = Dir[File.expand_path 'libs/*.jar'] - JRUBY_JARS
 RESOURCE_FILES = Dir[File.expand_path 'res/**/*']
 JAVA_SOURCE_FILES = Dir[File.expand_path 'src/**/*.java']
 RUBY_SOURCE_FILES = Dir[File.expand_path 'src/**/*.rb']
+RUBY_ACTIVITY_SOURCE_FILES = RUBY_SOURCE_FILES.select { |fn| fn =~ /_activity.rb$/ }
+OTHER_SOURCE_FILES = Dir[File.expand_path 'src/**/*'] - JAVA_SOURCE_FILES - RUBY_SOURCE_FILES
 CLASSES_CACHE = "#{PROJECT_DIR}/bin/#{build_project_name}-debug-unaligned.apk.d"
-APK_DEPENDENCIES = [:patch_dex, MANIFEST_FILE, RUBOTO_CONFIG_FILE, BUNDLE_JAR, CLASSES_CACHE] + JRUBY_JARS + JARS + JAVA_SOURCE_FILES + RESOURCE_FILES + RUBY_SOURCE_FILES
+BUILD_XML_FILE = "#{PROJECT_DIR}/build.xml"
+APK_DEPENDENCIES = [:patch_dex, MANIFEST_FILE, BUILD_XML_FILE, RUBOTO_CONFIG_FILE, BUNDLE_JAR, CLASSES_CACHE] + JRUBY_JARS + JARS + JAVA_SOURCE_FILES + RESOURCE_FILES + RUBY_SOURCE_FILES + OTHER_SOURCE_FILES
+QUICK_APK_DEPENDENCIES = APK_DEPENDENCIES - RUBY_SOURCE_FILES
 KEYSTORE_FILE = (key_store = File.readlines('ant.properties').grep(/^key.store=/).first) ? File.expand_path(key_store.chomp.sub(/^key.store=/, '').sub('${user.home}', '~')) : "#{build_project_name}.keystore"
 KEYSTORE_ALIAS = (key_alias = File.readlines('ant.properties').grep(/^key.alias=/).first) ? key_alias.chomp.sub(/^key.alias=/, '') : build_project_name
-APK_FILE_REGEXP = /^-rw-r--r--\s+(?:system|\d+\s+\d+)\s+(?:system|\d+)\s+(\d+)\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}|\w{3} \d{2}\s+(?:\d{4}|\d{2}:\d{2}))\s+(.*)$/
 JRUBY_ADAPTER_FILE = "#{PROJECT_DIR}/src/org/ruboto/JRubyAdapter.java"
+RUBOTO_ACTIVITY_FILE = "#{PROJECT_DIR}/src/org/ruboto/RubotoActivity.java"
 
 CLEAN.include('bin', 'gen', 'test/bin', 'test/gen')
 
-task :default => :debug
+task default: :debug
 
 if File.exists?(CLASSES_CACHE)
   expected_jars = File.readlines(CLASSES_CACHE).grep(%r{#{PROJECT_DIR}/libs/(.*\.jar) \\}).map { |l| l =~ %r{#{PROJECT_DIR}/libs/(.*\.jar) \\}; $1 }
@@ -132,45 +137,45 @@ file JRUBY_JARS => RUBOTO_CONFIG_FILE do
 end
 
 desc 'build debug package'
-task :debug => APK_FILE
+task debug: APK_FILE
 
 namespace :debug do
   desc 'build debug package if compiled files have changed'
-  task :quick => APK_DEPENDENCIES - RUBY_SOURCE_FILES do |t|
+  task quick: QUICK_APK_DEPENDENCIES do |t|
     build_apk(t, false)
   end
 end
 
 desc 'build package and install it on the emulator or device'
-task :install => APK_FILE do
-  install_apk
+task install: APK_FILE do
+  install_apk(package, APK_FILE)
 end
 
 desc 'uninstall, build, and install the application'
-task :reinstall => [:uninstall, APK_FILE, :install]
+task reinstall: [:uninstall, APK_FILE, :install]
 
 namespace :install do
   # FIXME(uwe):  Remove December 2013
   desc 'Deprecated:  use "reinstall" instead.'
-  task :clean => :reinstall do
+  task clean: :reinstall do
     puts '"rake install:clean" is deprecated.  Use "rake reinstall" instead.'
   end
 
   desc 'Install the application, but only if compiled files are changed.'
-  task :quick => 'debug:quick' do
-    install_apk
+  task quick: 'debug:quick' do
+    install_apk(package, APK_FILE)
   end
 end
 
 desc 'Build APK for release'
-task :release => [:tag, RELEASE_APK_FILE]
+task release: [:tag, RELEASE_APK_FILE]
 
 file RELEASE_APK_FILE => [KEYSTORE_FILE] + APK_DEPENDENCIES do |t|
   build_apk(t, true)
 end
 
 desc 'Create a keystore for signing the release APK'
-task :keystore => KEYSTORE_FILE
+task keystore: KEYSTORE_FILE
 
 file KEYSTORE_FILE do
   unless File.read('ant.properties') =~ /^key.store=/
@@ -215,18 +220,27 @@ task :stop do
 end
 
 desc 'Restart the application'
-task :restart => [:stop, :start]
+task restart: [:stop, :start]
 
 task :uninstall do
-  uninstall_apk
+  uninstall_apk(package, APK_FILE)
 end
 
 file PROJECT_PROPS_FILE
 file MANIFEST_FILE => PROJECT_PROPS_FILE do
   old_manifest = File.read(MANIFEST_FILE)
   manifest = old_manifest.dup
-  manifest.sub!(/(android:minSdkVersion=').*?(')/) { "#$1#{sdk_level}#$2" }
-  manifest.sub!(/(android:targetSdkVersion=').*?(')/) { "#$1#{sdk_level}#$2" }
+
+  # FIXME(uwe):  Remove 'L' special case when Android L has been released.
+  if sdk_level == 21
+    manifest.sub!(/(android:minSdkVersion=').*?(')/) { "#{$1}L#{$2}" }
+    manifest.sub!(/(android:targetSdkVersion=').*?(')/) { "#{$1}L#{$2}" }
+  else
+    manifest.sub!(/(android:minSdkVersion=').*?(')/) { "#{$1}#{sdk_level}#{$2}" }
+    manifest.sub!(/(android:targetSdkVersion=').*?(')/) { "#{$1}#{sdk_level}#{$2}" }
+  end
+  # EMXIF
+
   if manifest != old_manifest
     puts "\nUpdating #{File.basename MANIFEST_FILE} with target from #{File.basename PROJECT_PROPS_FILE}\n\n"
     File.open(MANIFEST_FILE, 'w') { |f| f << manifest }
@@ -235,93 +249,370 @@ end
 
 file RUBOTO_CONFIG_FILE
 
-task :jruby_adapter => JRUBY_ADAPTER_FILE
+task build_xml: BUILD_XML_FILE
+file BUILD_XML_FILE => RUBOTO_CONFIG_FILE do
+  puts 'patching build.xml'
+  ant_script = File.read(BUILD_XML_FILE)
+
+  # FIXME(uwe):  There is no output from this DEX helper.  Difficult to debug.
+  # FIXME(uwe):  Ensure that pre-dexed jars are not dexed again.
+  # FIXME(uwe):  Move this logic to ruboto/util/update.rb since it is independent of ruboto.yml changes.
+  # https://android.googlesource.com/platform/tools/base/+/master/legacy/ant-tasks/src/main/java/com/android/ant/DexExecTask.java
+  # def patch_ant_script(min_sdk, ant_script = File.read('build.xml'))
+  indent = '    '
+  start_marker = '<!-- BEGIN added by Ruboto -->'
+  end_marker = '<!-- END added by Ruboto -->'
+  dx_override = <<-EOF
+#{indent}#{start_marker}
+    <property name="second_dex_file" value="${out.absolute.dir}/classes2.dex" />
+
+    <macrodef name="multi-dex-helper">
+      <element name="external-libs" optional="yes" />
+      <sequential>
+            <union id="out.dex.jar.input.ref.union">
+                <resources refid="out.dex.jar.input.ref"/>
+            </union>
+            <if>
+                <condition>
+                    <uptodate targetfile="${out.absolute.dir}/classes.dex" >
+                        <srcfiles dir="${out.classes.absolute.dir}" includes="**/*.class"/>
+                        <srcresources refid="out.dex.jar.input.ref.union"/>
+                    </uptodate>
+                </condition>
+                <then>
+                    <echo>Java classes and jars are unchanged.</echo>
+                </then>
+                <else>
+                    <echo>Converting compiled files and external libraries into ${out.absolute.dir} (multi-dex)</echo>
+                    <delete file="${out.absolute.dir}/classes2.dex"/>
+                    <echo>Dexing ${out.classes.absolute.dir} and ${toString:out.dex.jar.input.ref}</echo>
+                    <apply executable="${dx}" failonerror="true" parallel="true">
+                        <arg value="--dex" />
+                        <arg value="--multi-dex" />
+                        <arg value="--output=${out.absolute.dir}" />
+                        <arg line="${jumbo.option}" />
+                        <arg line="${verbose.option}" />
+                        <arg path="${out.classes.absolute.dir}" />
+                        <path refid="out.dex.jar.input.ref" />
+                        <external-libs />
+                    </apply>
+                    <sleep seconds="1"/>
+                </else>
+            </if>
+      </sequential>
+    </macrodef>
+
+    <macrodef name="dex-helper">
+      <element name="external-libs" optional="yes" />
+      <attribute name="nolocals" default="false" />
+      <sequential>
+          <!-- sets the primary input for dex. If a pre-dex task sets it to
+               something else this has no effect -->
+        <property name="out.dex.input.absolute.dir" value="${out.classes.absolute.dir}" />
+
+        <!-- set the secondary dx input: the project (and library) jar files
+             If a pre-dex task sets it to something else this has no effect -->
+        <if>
+          <condition>
+            <isreference refid="out.dex.jar.input.ref" />
+          </condition>
+          <else>
+            <path id="out.dex.jar.input.ref">
+              <path refid="project.all.jars.path" />
+            </path>
+          </else>
+        </if>
+        <condition property="verbose.option" value="--verbose" else="">
+          <istrue value="${verbose}" />
+        </condition>
+        <condition property="jumbo.option" value="--force-jumbo" else="">
+          <istrue value="${dex.force.jumbo}" />
+        </condition>
+
+        <if>
+          <condition>
+            <not>
+              <available file="${second_dex_file}" />
+            </not>
+          </condition>
+          <then>
+            <!-- Regular DEX process.  We would prefer to use the Android SDK
+                 ANT target, but we need to detect the "use multidex" error.
+                 https://android.googlesource.com/platform/sdk/+/tools_r21.1/anttasks/src/com/android/ant/DexExecTask.java
+            -->
+            <mapper id="pre-dex-mapper" type="glob" from="libs/*.jar" to="bin/dexedLibs/*-dexed.jar"/>
+
+
+            <!-- FIXME(uwe): Output something about what we are doing -->
+
+            <apply executable="${dx}" failonerror="true" parallel="false" dest="${out.dexed.absolute.dir}" relative="true">
+                        <arg value="--dex" />
+                        <arg value="--output" />
+                        <targetfile/>
+                        <arg line="${jumbo.option}" />
+                        <arg line="${verbose.option}" />
+                        <fileset dir="." includes="libs/*" />
+                        <external-libs />
+                        <mapper refid="pre-dex-mapper"/>
+            </apply>
+
+            <apply executable="${dx}" resultproperty="dex.merge.result" outputproperty="dex.merge.output" parallel="true">
+                <arg value="--dex" />
+                <arg value="--output=${intermediate.dex.file}" />
+                <arg line="${jumbo.option}" />
+                <arg line="${verbose.option}" />
+                <arg path="${out.classes.absolute.dir}" />
+                <fileset dir="${out.dexed.absolute.dir}" includes="*-dexed.jar" />
+                <external-libs />
+            </apply>
+
+            <if>
+              <condition>
+                <or>
+                  <contains string="${dex.merge.output}" substring="method ID not in [0, 0xffff]: 65536"/>
+                  <contains string="${dex.merge.output}" substring="Too many method references"/>
+                </or>
+              </condition>
+              <then>
+                <echo message="The package contains too many methods.  Switching to multi-dex build." />
+                <multi-dex-helper>
+                  <external-libs>
+                    <external-libs/>
+                  </external-libs>
+                </multi-dex-helper>
+              </then>
+              <else>
+                <echo message="${dex.merge.output}"/>
+                <fail status="${dex.merge.result}">
+                  <condition>
+                    <not>
+                      <equals arg1="${dex.merge.result}" arg2="0"/>
+                    </not>
+                  </condition>
+                </fail>
+              </else>
+            </if>
+
+          </then>
+          <else>
+            <multi-dex-helper>
+              <external-libs>
+                <external-libs/>
+              </external-libs>
+            </multi-dex-helper>
+          </else>
+        </if>
+      </sequential>
+    </macrodef>
+
+    <!-- This is copied directly from <android-sdk>/tools/ant/build.xml,
+         just added the "-post-package-resources" dependency -->
+    <target name="-package" depends="-dex, -package-resources, -post-package-resources">
+        <!-- only package apk if *not* a library project -->
+        <do-only-if-not-library elseText="Library project: do not package apk..." >
+            <if condition="${build.is.instrumented}">
+                <then>
+                    <package-helper>
+                        <extra-jars>
+                            <!-- Injected from external file -->
+                            <jarfile path="${emma.dir}/emma_device.jar" />
+                        </extra-jars>
+                    </package-helper>
+                </then>
+                <else>
+                    <package-helper />
+                </else>
+            </if>
+        </do-only-if-not-library>
+    </target>
+
+    <target name="-post-package-resources">
+        <!-- FIXME(uwe):  This is hardcoded for one extra dex file.
+                          It should iterate over all classes?.dex files -->
+        <property name="second_dex_path" value="assets/classes2.jar" />
+        <property name="second_dex_jar" value="${out.dexed.absolute.dir}/${second_dex_path}" />
+        <property name="second_dex_copy" value="${out.dexed.absolute.dir}/classes.dex" />
+        <if>
+            <condition>
+              <and>
+                <available file="${second_dex_file}" />
+                <or>
+                  <not>
+                    <uptodate srcfile="${second_dex_file}" targetfile="${out.absolute.dir}/${resource.package.file.name}" />
+                  </not>
+                  <uptodate srcfile="${out.absolute.dir}/${resource.package.file.name}" targetfile="${out.absolute.dir}/${resource.package.file.name}.d" />
+                </or>
+              </and>
+            </condition>
+            <then>
+                <echo>Adding ${second_dex_path} to ${resource.package.file.name}</echo>
+                <exec executable="aapt" dir="${out.dexed.absolute.dir}">
+                  <arg line='remove -v "${out.absolute.dir}/${resource.package.file.name}" ${second_dex_path}'/>
+                </exec>
+                <copy file="${second_dex_file}" tofile="${second_dex_copy}"/>
+                <mkdir dir="${out.dexed.absolute.dir}/assets"/>
+                <zip destfile="${second_dex_jar}" basedir="${out.dexed.absolute.dir}" includes="classes.dex" />
+                <delete file="${second_dex_copy}"/>
+
+                <!-- FIXME(uwe): Use zip instead of aapt? -->
+                <exec executable="aapt" dir="${out.dexed.absolute.dir}" failonerror="true">
+                  <arg line='add -v "${out.absolute.dir}/${resource.package.file.name}" ${second_dex_path}'/>
+                </exec>
+                <!-- EMXIF -->
+
+            </then>
+        </if>
+    </target>
+    #{end_marker}
+  EOF
+
+  ant_script.gsub!(/\s*#{start_marker}.*?#{end_marker}\s*/m, '')
+  # FIXME(uwe): Remove condition when we stop supporting Android 4.0 and older.
+  if sdk_level >= 16
+    unless ant_script.gsub!(/\s*(<\/project>)/, "\n\n#{dx_override}\n\n\\1")
+      raise 'Bad ANT script'
+    end
+  end
+  File.open(BUILD_XML_FILE, 'w') { |f| f << ant_script }
+end
+
+task jruby_adapter: JRUBY_ADAPTER_FILE
 file JRUBY_ADAPTER_FILE => RUBOTO_CONFIG_FILE do
   require 'yaml'
+
+  ruboto_yml = (YAML.load(File.read(RUBOTO_CONFIG_FILE)) || {})
+  source = File.read(JRUBY_ADAPTER_FILE)
+
+  #
+  # HeapAlloc
+  #
+  comment = ''
   marker_topic ='Ruboto HeapAlloc'
   begin_marker = "// BEGIN #{marker_topic}"
   end_marker = "// END #{marker_topic}"
-  unless (heap_alloc = YAML.load(File.read(RUBOTO_CONFIG_FILE))['heap_alloc'])
+  unless (heap_alloc = ruboto_yml['heap_alloc'])
     heap_alloc = 13
     comment = '// '
   end
+  indent = ' ' * 12
   config = <<EOF
-            #{begin_marker}
-            #{comment}@SuppressWarnings("unused")
-            #{comment}byte[] arrayForHeapAllocation = new byte[#{heap_alloc} * 1024 * 1024];
-            #{comment}arrayForHeapAllocation = null;
-            #{end_marker}
+#{indent}#{begin_marker}
+#{indent}#{comment}@SuppressWarnings("unused")
+#{indent}#{comment}byte[] arrayForHeapAllocation = new byte[#{heap_alloc} * 1024 * 1024];
+#{indent}#{comment}arrayForHeapAllocation = null;
+#{indent}#{end_marker}
 EOF
-  source = File.read(JRUBY_ADAPTER_FILE)
-  heap_alloc_pattern = %r{^\s*#{begin_marker}\n.*^\s*#{end_marker}\n}m
-  File.open(JRUBY_ADAPTER_FILE, 'w') { |f| f << source.sub(heap_alloc_pattern, config) }
+  pattern = %r{^\s*#{begin_marker}\n.*^\s*#{end_marker}\n}m
+  source = source.sub(pattern, config)
+
+  #
+  # RubyVersion
+  #
+  comment = ''
+  marker_topic ='Ruboto RubyVersion'
+  begin_marker = "// BEGIN #{marker_topic}"
+  end_marker = "// END #{marker_topic}"
+  unless (ruby_version = ruboto_yml['ruby_version'])
+    ruby_version = 2.0
+    comment = '// '
+  end
+  ruby_version = ruby_version.to_s
+  ruby_version['.'] = '_'
+  config = <<EOF
+#{indent}#{begin_marker}
+#{indent}#{comment}System.setProperty("jruby.compat.version", "RUBY#{ruby_version}"); // RUBY1_9 is the default in JRuby 1.7
+#{indent}#{end_marker}
+EOF
+  pattern = %r{^\s*#{begin_marker}\n.*^\s*#{end_marker}\n}m
+  source = source.sub(pattern, config)
+
+  File.open(JRUBY_ADAPTER_FILE, 'w') { |f| f << source }
 end
+
+task ruboto_activity: RUBOTO_ACTIVITY_FILE
+file RUBOTO_ACTIVITY_FILE => RUBY_ACTIVITY_SOURCE_FILES do |task|
+  original_source = File.read(RUBOTO_ACTIVITY_FILE)
+  next unless original_source =~ %r{\A(.*Generated Methods.*?\*/\n*)(.*)\B}m
+  intro, generated_methods = $1, $2.scan(/(?:\s*\n*)(^\s*?public.*?^  }\n)/m).flatten
+  implemented_methods = task.prerequisites.map { |f| File.read(f).scan(/(?:^\s*def\s+)([^\s(]+)/) }.flatten.sort
+  commented_methods = generated_methods.map do |gm|
+    implemented_methods.
+        any? { |im| gm.upcase.include?(" #{im.upcase.gsub('_', '')}(") } ?
+        gm : "/*\n#{gm}*/\n"
+  end
+  new_source = "#{intro}#{commented_methods.join("\n")}\n}\n"
+  if new_source != original_source
+    File.open(RUBOTO_ACTIVITY_FILE, 'w') { |f| f << new_source }
+  end
+end
+
+task apk_dependencies: APK_DEPENDENCIES
 
 file APK_FILE => APK_DEPENDENCIES do |t|
   build_apk(t, false)
 end
 
-MINIMUM_DX_HEAP_SIZE = 2048
+MINIMUM_DX_HEAP_SIZE = 4096
 task :patch_dex do
-  new_dx_content = File.read(DX_FILENAME).dup
-  xmx_pattern = ON_WINDOWS ? /^set defaultXmx=-Xmx(\d+)(M|m|G|g|T|t)/ : /^defaultMx="-Xmx(\d+)(M|m|G|g|T|t)"/
-  if new_dx_content =~ xmx_pattern &&
-      ($1.to_i * 1024 ** {'M' => 2, 'G' => 3, 'T' => 4}[$2.upcase]) < MINIMUM_DX_HEAP_SIZE*1024**2
-    puts "Increasing max heap space from #$1#$2 to #{MINIMUM_DX_HEAP_SIZE}M in #{DX_FILENAME}"
-    new_xmx_value = ON_WINDOWS ? %Q{set defaultXmx=-Xmx#{MINIMUM_DX_HEAP_SIZE}M} : %Q{defaultMx="-Xmx#{MINIMUM_DX_HEAP_SIZE}M"}
-    new_dx_content.sub!(xmx_pattern, new_xmx_value)
-    File.open(DX_FILENAME, 'w') { |f| f << new_dx_content } rescue puts "\n!!! Unable to increase dx heap size !!!\n\n"
+  DX_FILENAMES.each do |dx_filename|
+    new_dx_content = File.read(dx_filename).dup
+    xmx_pattern = ON_WINDOWS ? /^set defaultXmx=-Xmx(\d+)(M|m|G|g|T|t)/ : /^defaultMx="-Xmx(\d+)(M|m|G|g|T|t)"/
+    if new_dx_content =~ xmx_pattern &&
+        ($1.to_i * 1024 ** {M: 2, G: 3, T: 4}[$2.upcase.to_sym]) < MINIMUM_DX_HEAP_SIZE*1024**2
+      puts "Increasing max heap space from #{$1}#{$2} to #{MINIMUM_DX_HEAP_SIZE}M in #{dx_filename}"
+      new_xmx_value = ON_WINDOWS ? %Q{set defaultXmx=-Xmx#{MINIMUM_DX_HEAP_SIZE}M} : %Q{defaultMx="-Xmx#{MINIMUM_DX_HEAP_SIZE}M"}
+      new_dx_content.sub!(xmx_pattern, new_xmx_value)
+      File.open(dx_filename, 'w') { |f| f << new_dx_content } rescue puts "\n!!! Unable to increase dx heap size !!!\n\n"
+    end
   end
 end
 
 desc 'Copy scripts to emulator or device'
-task :update_scripts => %w(install:quick) do
-  update_scripts
+task update_scripts: %w(install:quick) do
+  update_scripts(package)
 end
 
 desc 'Copy scripts to emulator or device and reload'
-task :boing => %w(update_scripts:reload)
+task boing: %w(update_scripts:reload)
 
 namespace :update_scripts do
   desc 'Copy scripts to emulator and restart the app'
-  task :restart => APK_DEPENDENCIES - RUBY_SOURCE_FILES do |t|
+  task restart: QUICK_APK_DEPENDENCIES do |t|
     if build_apk(t, false) || !stop_app
-      install_apk
+      install_apk(package, APK_FILE)
     else
-      update_scripts
+      update_scripts(package)
     end
     start_app
   end
 
   desc 'Copy scripts to emulator and restart the app'
-  task :start => APK_DEPENDENCIES - RUBY_SOURCE_FILES do |t|
+  task start: QUICK_APK_DEPENDENCIES do |t|
     if build_apk(t, false)
-      install_apk
+      install_apk(package, APK_FILE)
     else
-      update_scripts
+      update_scripts(package)
     end
     start_app
   end
 
   desc 'Copy scripts to emulator and reload'
-  task :reload => APK_DEPENDENCIES - RUBY_SOURCE_FILES do |t|
+  task reload: QUICK_APK_DEPENDENCIES do |t|
     if build_apk(t, false)
-      install_apk
+      install_apk(package, APK_FILE)
       start_app
     else
-      scripts = update_scripts
-      if scripts
-        if app_running?
-          reload_scripts(scripts)
-        else
-          start_app
-        end
+      scripts = update_scripts(package)
+      if scripts && app_running?
+        reload_scripts(scripts)
+      else
+        start_app
       end
     end
   end
 end
 
-task :test => APK_DEPENDENCIES + [:uninstall] do
+task test: APK_DEPENDENCIES + [:uninstall] do
   Dir.chdir('test') do
     puts 'Running tests'
     sh "adb uninstall #{package}.tests"
@@ -330,12 +621,12 @@ task :test => APK_DEPENDENCIES + [:uninstall] do
 end
 
 namespace :test do
-  task :quick => :update_scripts do
+  task quick: :update_scripts do
     Dir.chdir('test') do
       puts 'Running quick tests'
       install_retry_count = 0
       begin
-        timeout 120 do
+        timeout 300 do
           sh "#{ANT_CMD} instrument install"
         end
       rescue TimeoutError
@@ -357,34 +648,43 @@ file GEM_FILE
 file GEM_LOCK_FILE
 
 desc 'Generate bundle jar from Gemfile'
-task :bundle => BUNDLE_JAR
+task bundle: BUNDLE_JAR
 
 file BUNDLE_JAR => [GEM_FILE, GEM_LOCK_FILE] do
   next unless File.exists? GEM_FILE
   puts "Generating #{BUNDLE_JAR}"
   require 'bundler'
-  # Issue #547 https://github.com/ruboto/ruboto/issues/547
-  if true || Gem::Version.new(Bundler::VERSION) <= Gem::Version.new('1.5.0')
+  if false
+    # FIXME(uwe): Issue #547 https://github.com/ruboto/ruboto/issues/547
+    # Bundler.settings[:platform] = Gem::Platform::DALVIK
+    sh "bundle install --gemfile #{GEM_FILE} --path=#{BUNDLE_PATH} --platform=dalvik#{sdk_level} --without development test"
+  else
+    # ENV["DEBUG"] = "true"
     require 'bundler/vendored_thor'
 
     # Store original RubyGems/Bundler environment
     platforms = Gem.platforms
     ruby_engine = defined?(RUBY_ENGINE) && RUBY_ENGINE
-    gem_paths = {'GEM_HOME' => Gem.path, 'GEM_PATH' => Gem.dir}
+    env_home = ENV['GEM_HOME']
+    env_path = ENV['GEM_PATH']
 
     # Override RUBY_ENGINE (we can bundle from MRI for JRuby)
     Gem.platforms = [Gem::Platform::RUBY, Gem::Platform.new("universal-dalvik-#{sdk_level}"), Gem::Platform.new('universal-java')]
-    Gem.paths = {'GEM_HOME' => BUNDLE_PATH, 'GEM_PATH' => BUNDLE_PATH}
+    ENV['GEM_HOME'] = BUNDLE_PATH
+    ENV['GEM_PATH'] = BUNDLE_PATH
+    Gem.paths = BUNDLE_PATH
+    Gem.refresh
     old_verbose, $VERBOSE = $VERBOSE, nil
     begin
       Object.const_set('RUBY_ENGINE', 'jruby')
     ensure
       $VERBOSE = old_verbose
     end
-
     ENV['BUNDLE_GEMFILE'] = GEM_FILE
+
     Bundler.ui = Bundler::UI::Shell.new
     Bundler.bundle_path = Pathname.new BUNDLE_PATH
+    Bundler.settings.without = [:development, :test]
     definition = Bundler.definition
     definition.validate_ruby!
     Bundler::Installer.install(Bundler.root, definition)
@@ -401,10 +701,8 @@ file BUNDLE_JAR => [GEM_FILE, GEM_LOCK_FILE] do
       $VERBOSE = old_verbose
     end
     Gem.platforms = platforms
-    Gem.paths = gem_paths['GEM_PATH']
-  else
-    # Bundler.settings[:platform] = Gem::Platform::DALVIK
-    sh "bundle install --gemfile #{GEM_FILE} --path=#{BUNDLE_PATH} --platform=dalvik#{sdk_level}"
+    ENV['GEM_HOME'] = env_home
+    ENV['GEM_PATH'] = env_path
   end
 
   gem_paths = Dir["#{BUNDLE_PATH}/gems"]
@@ -493,7 +791,7 @@ Java::arjdbc.jdbc.AdapterJavaService.new.basicLoad(JRuby.runtime)
             # ODOT
 
             # FIXME(uwe): Extract files with case sensitive names for ARJDBC 1.2.7-1.3.x
-            puts `jar xf #{jar} arjdbc/mssql/MSSQLRubyJdbcConnection.class arjdbc/sqlite3/SQLite3RubyJdbcConnection.class`
+            puts `jar xf #{jar} arjdbc/postgresql/PostgreSQLRubyJdbcConnection.class arjdbc/mssql/MSSQLRubyJdbcConnection.class arjdbc/sqlite3/SQLite3RubyJdbcConnection.class`
             # EMXIF
 
           elsif jar =~ /shared\/jopenssl.jar$/
@@ -516,6 +814,20 @@ require 'jruby'
 puts 'Starting JSON Parser Service'
 public
 Java::json.ext.ParserService.new.basicLoad(JRuby.runtime)
+            END_CODE
+          elsif jar =~ %r{thread_safe/jruby_cache_backend.jar$}
+            jar_load_code = <<-END_CODE
+require 'jruby'
+puts 'Starting threadsafe JRubyCacheBackend Service'
+public
+begin
+  Java::thread_safe.JrubyCacheBackendService.new.basicLoad(JRuby.runtime)
+rescue Exception
+  puts "Exception starting threadsafe JRubyCacheBackend Service"
+  puts $!
+  puts $!.backtrace.join("\n")
+  raise
+end
             END_CODE
           else
             jar_load_code = ''
@@ -552,8 +864,13 @@ task :log, [:filter] do |t, args|
     started_regex = Regexp.new "^\\I/ActivityManager.+Start proc #{package} for activity #{package}/\\.#{main_activity}: pid=(?<pid>\\d+)"
     restarted_regex = Regexp.new "^\\I/ActivityManager.+START u0 {cmp=#{package}/org.ruboto.RubotoActivity.+} from pid (?<pid>\\d+)"
     related_regex = Regexp.new "#{package}|#{main_activity}"
+    android_4_2_noise_regex = /Unexpected value from nativeGetEnabledTags/
     pid_regex = nil
     logcat.each_line do |line|
+      line.force_encoding(Encoding::BINARY)
+      # FIXME(uwe): Remove when we stop supporting Ancdroid 4.2
+      next if line =~ android_4_2_noise_regex
+      # EMXIF
       if (activity_start_match = started_regex.match(line) || restarted_regex.match(line))
         activity_started = true
         pid = activity_start_match[:pid]
@@ -571,20 +888,9 @@ end
 # Methods
 
 def sdk_level
-  File.read(PROJECT_PROPS_FILE).scan(/(?:target=android-)(\d+)/)[0][0].to_i
-end
-
-def mark_update(time = Time.now)
-  FileUtils.mkdir_p File.dirname(UPDATE_MARKER_FILE)
-  File.open(UPDATE_MARKER_FILE, 'w') { |f| f << time.iso8601 }
-end
-
-def clear_update
-  mark_update File.ctime APK_FILE
-  if device_path_exists?(scripts_path)
-    sh "adb shell rm -r #{scripts_path}"
-    puts "Deleted scripts directory #{scripts_path}"
-  end
+  # FIXME(uwe):  Remove special case 'L' when Android L is released.
+  level = File.read(PROJECT_PROPS_FILE).scan(/(?:target=android-)(\d+|L)/)[0][0].to_i
+  level == 0 ? 21 : level
 end
 
 def strings(name)
@@ -605,33 +911,6 @@ def main_activity
   manifest.root.elements['application'].elements["activity[@android:label='@string/app_name']"].attribute('android:name')
 end
 
-def device_path_exists?(path)
-  path_output =`adb shell ls #{path}`
-  path_output.chomp !~ /No such file or directory|opendir failed, Permission denied/
-end
-
-# Determine if the package is installed.
-# Return true if the package is installed and is identical to the local package.
-# Return false if the package is installed, but differs from the local package.
-# Return nil if the package is not installed.
-def package_installed?(test = false)
-  package_name = "#{package}#{'.tests' if test}"
-  loop do
-    path_line = `adb shell pm path #{package_name}`.chomp
-    return nil if $? == 0 && path_line.empty?
-    break if $? == 0 && path_line =~ /^package:(.*)$/
-    sleep 0.5
-  end
-  path = $1
-  o = `adb shell ls -l #{path}`.chomp
-  raise "Unexpected ls output: #{o}" if o !~ APK_FILE_REGEXP
-  installed_apk_size = $1.to_i
-  installed_timestamp = Time.parse($2)
-  apk_file = test ? TEST_APK_FILE : APK_FILE
-  !File.exists?(apk_file) || (installed_apk_size == File.size(apk_file) &&
-      installed_timestamp >= File.mtime(apk_file))
-end
-
 def replace_faulty_code(faulty_file, faulty_code)
   explicit_requires = Dir["#{faulty_file.chomp('.rb')}/*.rb"].sort.map { |f| File.basename(f) }.map do |filename|
     "require 'active_model/validations/#{filename}'"
@@ -650,8 +929,8 @@ end
 def build_apk(t, release)
   apk_file = release ? RELEASE_APK_FILE : APK_FILE
   if File.exist?(apk_file)
-    changed_prereqs = t.prerequisites.select do |p|
-      File.file?(p) && !Dir[p].empty? && Dir[p].map { |f| File.mtime(f) }.max > File.mtime(apk_file)
+    changed_prereqs = t.prerequisites.select do |pr|
+      File.file?(pr) && !Dir[pr].empty? && Dir[pr].map { |f| File.mtime(f) }.max > File.mtime(apk_file)
     end
     return false if changed_prereqs.empty?
     changed_prereqs.each { |f| puts "#{f} changed." }
@@ -665,99 +944,6 @@ def build_apk(t, release)
   true
 end
 
-def install_apk
-  failure_pattern = /^Failure \[(.*)\]/
-  success_pattern = /^Success/
-  case package_installed?
-  when true
-    puts "Package #{package} already installed."
-    return
-  when false
-    puts "Package #{package} already installed, but of different size or timestamp.  Replacing package."
-    sh "adb shell date -s #{Time.now.strftime '%Y%m%d.%H%M%S'}"
-    output = nil
-    install_retry_count = 0
-    begin
-      timeout 120 do
-        output = `adb install -r "#{APK_FILE}" 2>&1`
-      end
-    rescue Timeout::Error
-      puts "Installing package #{package} timed out."
-      install_retry_count += 1
-      if install_retry_count <= 3
-        puts 'Retrying install...'
-        retry
-      end
-      puts 'Trying one final time to install the package:'
-      output = `adb install -r "#{APK_FILE}" 2>&1`
-    end
-    if $? == 0 && output !~ failure_pattern && output =~ success_pattern
-      clear_update
-      return
-    end
-    case $1
-    when 'INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES'
-      puts 'Found package signed with different certificate.  Uninstalling it and retrying install.'
-    else
-      puts "'adb install' returned an unknown error: (#$?) #{$1 ? "[#$1}]" : output}."
-      puts "Uninstalling #{package} and retrying install."
-    end
-    uninstall_apk
-  else
-    # Package not installed.
-    sh "adb shell date -s #{Time.now.strftime '%Y%m%d.%H%M%S'}"
-  end
-  puts "Installing package #{package}"
-  output = nil
-  install_retry_count = 0
-  begin
-    timeout 120 do
-      output = `adb install "#{APK_FILE}" 2>&1`
-    end
-  rescue Timeout::Error
-    puts "Installing package #{package} timed out."
-    install_retry_count += 1
-    if install_retry_count <= 3
-      puts 'Retrying install...'
-      retry
-    end
-    puts 'Trying one final time to install the package:'
-    output = `adb install "#{APK_FILE}" 2>&1`
-  end
-  puts output
-  raise "Install failed (#{$?}) #{$1 ? "[#$1}]" : output}" if $? != 0 || output =~ failure_pattern || output !~ success_pattern
-  clear_update
-end
-
-def uninstall_apk
-  return if package_installed?.nil?
-  puts "Uninstalling package #{package}"
-  system "adb uninstall #{package}"
-  if $? != 0 && package_installed?
-    puts "Uninstall failed exit code #{$?}"
-    exit $?
-  end
-end
-
-def update_scripts
-  `adb shell mkdir -p #{scripts_path}` if !device_path_exists?(scripts_path)
-  last_update = File.exists?(UPDATE_MARKER_FILE) ? Time.parse(File.read(UPDATE_MARKER_FILE)) : Time.parse('1970-01-01T00:00:00')
-  Dir.chdir('src') do
-    source_files = Dir['**/*.rb']
-    changed_files = source_files.select { |f| !File.directory?(f) && File.mtime(f) >= last_update && f !~ /~$/ }
-    unless changed_files.empty?
-      puts 'Pushing files to apk public file area.'
-      changed_files.each do |script_file|
-        print "#{script_file}: "; $stdout.flush
-        `adb push #{script_file} #{scripts_path}/#{script_file}`
-      end
-      mark_update
-      return changed_files
-    end
-  end
-  return nil
-end
-
 def app_running?
   `adb shell ps | egrep -e " #{package}\r$"`.size > 0
 end
@@ -768,8 +954,8 @@ end
 
 # Triggers reload of updated scripts and restart of the current activity
 def reload_scripts(scripts)
-  s = scripts.map{|s| s.gsub(/[&;]/){|m| "&#{m[0]}"}}.join(';')
-  cmd = %Q{adb shell am broadcast -a android.intent.action.VIEW -e reload "#{s}"}
+  s = scripts.map { |s| s.gsub(/[&;]/) { |m| "&#{m[0]}" } }.join('\;')
+  cmd = %Q{adb shell am broadcast -a android.intent.action.VIEW -e reload '#{s}'}
   puts cmd
   system cmd
 end

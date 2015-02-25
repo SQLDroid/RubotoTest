@@ -70,30 +70,33 @@ test 'testBlob' do |activity|
   blobSize1.times do |counter|
     aBlob1[counter] = (counter % 10 + 0x30)
   end
+  aBlob = aBlob.to_java(:byte)
+  aBlob1 = aBlob1.to_java(:byte)
 
   stringBlob = 'ABlob'
   blobInserts = [
-      "INSERT INTO blobtest(key,value) VALUES (101, '"+stringBlob+"')",
-      "INSERT INTO blobtest(key,value) VALUES (?, ?)",
-      "INSERT INTO blobtest(key,value) VALUES (?, ?)",
-      "INSERT INTO blobtest(key,value) VALUES (401, ?)"
+      "INSERT INTO blobtest(key,value) VALUES (101, '#{stringBlob}')",
+      'INSERT INTO blobtest(key,value) VALUES (?, ?)',
+      'INSERT INTO blobtest(key,value) VALUES (?, ?)',
+      'INSERT INTO blobtest(key,value) VALUES (401, ?)'
   ]
 
   con.createStatement().execute(blobInserts[0])
   b = selectBlob(con, 101)
-  assert_equal(stringBlob.bytes.to_a, b.getBytes(0, b.length()-1).to_a, 'String blob bytes')
-  assert_equal(stringBlob.length, String.from_java_bytes(b.getBytes(1, b.length()-1)).to_s.length, 'String blob length')
-  assert_equal(stringBlob.to_s, String.from_java_bytes(b.getBytes(1, b.length()-1)).to_s, 'String blob')
+  assert_equal(stringBlob.bytes.to_a.length, b.length(), 'String blob length')
+  assert_equal(stringBlob.bytes.to_a, b.getBytes(1, b.length()).to_a, 'String blob bytes')
+  assert_equal(stringBlob.length, String.from_java_bytes(b.getBytes(1, b.length())).to_s.length, 'String from java bytes blob length')
+  assert_equal(stringBlob.to_s, String.from_java_bytes(b.getBytes(1, b.length())).to_s, 'String blob')
 
   stmt = con.prepareStatement(blobInserts[1])
   stmt.setInt(1, blobSize)
   stmt.setBinaryStream(2, ByteArrayInputStream.new(aBlob), aBlob.length)
   stmt.execute()
   b = selectBlob(con, blobSize)
-  assert_equal(blobSize, b.length(), " Correct Length ")
+  assert_equal(blobSize, b.length(), 'Correct Length')
   bytes = b.getBytes(0, blobSize)
   blobSize.times do |counter|
-    assert_equal((counter %10), bytes[counter], " Blob Element "+ counter)
+    assert_equal((counter %10), bytes[counter], "Blob Element: #{counter}")
   end
 
   stmt = con.prepareStatement(blobInserts[2])
@@ -101,20 +104,20 @@ test 'testBlob' do |activity|
   stmt.setBinaryStream(2, ByteArrayInputStream.new(aBlob1), aBlob1.length)
   stmt.execute()
   b = selectBlob(con, blobSize1)
-  assert_equal(blobSize1, b.length(), " Correct 1 Length ")
+  assert_equal(blobSize1, b.length(), 'Correct 1 Length')
   bytes1 = b.getBytes(0, blobSize1)
   blobSize1.times do |counter|
-    assert_equal((counter %10 + 0x30), bytes1[counter], " Blob1 Element "+ counter)
+    assert_equal((counter %10 + 0x30), bytes1[counter], "Blob1 Element: #{counter}")
   end
 
   stmt = con.prepareStatement(blobInserts[3])
   stmt.setBinaryStream(1, ByteArrayInputStream.new(aBlob), aBlob.length)
   stmt.execute()
   b = selectBlob(con, 401)
-  assert_equal(blobSize, b.length(), " Correct Length ")
+  assert_equal(blobSize, b.length(), 'Correct Length')
   bytes = b.getBytes(0, blobSize)
   blobSize.times do |counter|
-    assert_equal((counter %10), bytes[counter], " Blob Element "+ counter)
+    assert_equal((counter %10), bytes[counter], "Blob Element: #{counter}")
   end
 
 end
